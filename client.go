@@ -147,7 +147,9 @@ func (cl *BulkClient) produce(ctx context.Context, req *http.Request, results ch
 	resp, err := cl.httpclient.Do(req)
 
 	defer func() {
-		if resp != nil { resp.Body.Close() }
+		if resp != nil {
+			resp.Body.Close()
+		}
 	}()
 
 	if err != nil && (ctx.Err() == context.Canceled || ctx.Err() == context.DeadlineExceeded) {
