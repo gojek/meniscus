@@ -64,15 +64,19 @@ func (r *RoundTrip) AddRequest(request *http.Request) *RoundTrip {
 	return r
 }
 
-//addResponse ...
-func (r *RoundTrip) addResponse(response *http.Response, index int) *RoundTrip {
+//addResponse
+//This is ostensibly thread-safe because only the specific indices of the arrays are being updated
+//Which is why we don't require a channel or a mutex
+func (r *RoundTrip) updateResponseForIndex(response *http.Response, index int) *RoundTrip {
 	r.responses[index] = response
 	r.errors[index] = nil
 	return r
 }
 
-//addErrors ...
-func (r *RoundTrip) addError(err error, index int) *RoundTrip {
+//addErrors
+//This is ostensibly thread-safe because only the specific indices of the array are being updated
+//Which is why we don't require a channel or a mutex
+func (r *RoundTrip) updateErrorForIndex(err error, index int) *RoundTrip {
 	r.errors[index] = err
 	r.responses[index] = nil
 	return r
@@ -123,9 +127,9 @@ func (r *RoundTrip) addRequestIgnoredErrors() {
 func (cl *BulkClient) responseListener(bulkRequest *RoundTrip, results chan responseParcel, doneRequestIds chan int) {
 	resParcel := <-results
 	if resParcel.err != nil {
-		bulkRequest.addError(resParcel.err, resParcel.index)
+		bulkRequest.updateErrorForIndex(resParcel.err, resParcel.index)
 	} else {
-		bulkRequest.addResponse(resParcel.response, resParcel.index)
+		bulkRequest.updateResponseForIndex(resParcel.response, resParcel.index)
 	}
 
 	doneRequestIds <- resParcel.index
@@ -136,11 +140,11 @@ func (cl *BulkClient) completionListener(ctx context.Context, bulkRequest *Round
 	for len(doneRequestIds) < len(bulkRequest.requests) {
 		select {
 		case <-ctx.Done():
-			bulkRequest.addRequestIgnoredErrors()
 			break LOOP
 		}
 	}
 
+	bulkRequest.addRequestIgnoredErrors()
 	return bulkRequest.responses, bulkRequest.errors
 }
 
