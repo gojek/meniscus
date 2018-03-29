@@ -92,14 +92,15 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip) ([]*http.Response, []error) {
 	defer cancel()
 
 	results := make(chan responseParcel, noOfRequests)
+	doneRequests := make(chan int, noOfRequests)
 
-	for i, req := range bulkRequest.requests {
-		bulkRequest.requests[i] = req.WithContext(ctx)
-		go cl.produce(ctx, bulkRequest.requests[i], results, i)
+	for index, req := range bulkRequest.requests {
+		bulkRequest.requests[index] = req.WithContext(ctx)
+		go cl.makeRequest(ctx, bulkRequest.requests[index], results, index)
+		go cl.responseListener(bulkRequest, results, doneRequests)
 	}
 
-	// TODO: Add a way to make multiple listeners
-	return cl.listener(ctx, bulkRequest, cancel, results)
+	return cl.completionListener(ctx, bulkRequest, results, doneRequests)
 }
 
 //CloseAllResponses ...
@@ -111,7 +112,7 @@ func (r *RoundTrip) CloseAllResponses() {
 	}
 }
 
-func (r *RoundTrip) addRequestIgnoredErrors(doneRequests int) {
+func (r *RoundTrip) addRequestIgnoredErrors() {
 	for i, response := range r.responses {
 		if response == nil && r.errors[i] == nil {
 			r.errors[i] = RequestIgnored
@@ -119,31 +120,31 @@ func (r *RoundTrip) addRequestIgnoredErrors(doneRequests int) {
 	}
 }
 
-func (cl *BulkClient) listener(ctx context.Context, bulkRequest *RoundTrip, cancelFunc context.CancelFunc, results chan responseParcel) ([]*http.Response, []error) {
-	done := 0
-	for {
-		select {
-		case <-ctx.Done():
-			bulkRequest.addRequestIgnoredErrors(done)
-			return bulkRequest.responses, bulkRequest.errors
-
-		case resParcel := <-results:
-			if resParcel.err != nil {
-				bulkRequest.addError(resParcel.err, resParcel.index)
-			} else {
-				bulkRequest.addResponse(resParcel.response, resParcel.index)
-			}
-
-			done++
-
-			if done == len(bulkRequest.requests) {
-				return bulkRequest.responses, bulkRequest.errors
-			}
-		}
+func (cl *BulkClient) responseListener(bulkRequest *RoundTrip, results chan responseParcel, doneRequestIds chan int) {
+	resParcel := <-results
+	if resParcel.err != nil {
+		bulkRequest.addError(resParcel.err, resParcel.index)
+	} else {
+		bulkRequest.addResponse(resParcel.response, resParcel.index)
 	}
+
+	doneRequestIds <- resParcel.index
 }
 
-func (cl *BulkClient) produce(ctx context.Context, req *http.Request, results chan responseParcel, index int) {
+func (cl *BulkClient) completionListener(ctx context.Context, bulkRequest *RoundTrip, results chan responseParcel, doneRequestIds chan int) ([]*http.Response, []error) {
+	LOOP:
+	for len(doneRequestIds) < len(bulkRequest.requests) {
+		select {
+		case <-ctx.Done():
+			bulkRequest.addRequestIgnoredErrors()
+			break LOOP
+		}
+	}
+
+	return bulkRequest.responses, bulkRequest.errors
+}
+
+func (cl *BulkClient) makeRequest(ctx context.Context, req *http.Request, results chan responseParcel, index int) {
 	resp, err := cl.httpclient.Do(req)
 
 	defer func() {
