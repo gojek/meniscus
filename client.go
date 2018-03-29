@@ -6,8 +6,12 @@ import (
 	"time"
 	"fmt"
 	"errors"
-//	"poi-service/httpclient"
+	"io/ioutil"
+	"bytes"
 )
+
+var RequestIgnored = errors.New("request ignored")
+var NoRequests = errors.New("no requests provided")
 
 //HTTPClient ...
 type HTTPClient interface {
@@ -25,60 +29,64 @@ type BulkClient struct {
 	timeout    time.Duration
 }
 
-//BulkRequest TODO: Change the name to something that represents a request-response cycle
-type BulkRequest struct {
-	requests   []*http.Request
-	responses  []*http.Response
-	errors     []error
+//RoundTrip ...
+type RoundTrip struct {
+	requests  []*http.Request
+	responses []*http.Response
+	errors    []error
 }
 
 type responseParcel struct {
 	response *http.Response
 	err      error
+	index    int
 }
 
 //NewBulkHTTPClient ...
 func NewBulkHTTPClient(client HTTPClient, timeout time.Duration) *BulkClient {
 	return &BulkClient{
 		httpclient: client,
-		timeout: timeout,
+		timeout:    timeout,
 	}
 }
 
 //NewBulkRequest ...
-func NewBulkRequest() *BulkRequest {
-	return &BulkRequest{
-		requests: []*http.Request{},
+func NewBulkRequest() *RoundTrip {
+	return &RoundTrip{
+		requests:  []*http.Request{},
 		responses: []*http.Response{},
 	}
 }
 
-//Add ...
-func (r *BulkRequest) Add(request *http.Request) *BulkRequest {
+//AddRequest ...
+func (r *RoundTrip) AddRequest(request *http.Request) *RoundTrip {
 	r.requests = append(r.requests, request)
 	return r
 }
 
 //addResponse ...
-func (r *BulkRequest) addResponse(response *http.Response) *BulkRequest {
-	r.responses = append(r.responses, response)
+func (r *RoundTrip) addResponse(response *http.Response, index int) *RoundTrip {
+	r.responses[index] = response
+	r.errors[index] = nil
 	return r
 }
 
-
 //addErrors ...
-func (r *BulkRequest) addError(err error) *BulkRequest {
-	r.errors = append(r.errors, err)
+func (r *RoundTrip) addError(err error, index int) *RoundTrip {
+	r.errors[index] = err
+	r.responses[index] = nil
 	return r
 }
 
 //Do ...
-func (cl *BulkClient) Do(bulkRequest *BulkRequest) ([]*http.Response, []error) {
+func (cl *BulkClient) Do(bulkRequest *RoundTrip) ([]*http.Response, []error) {
 	noOfRequests := len(bulkRequest.requests)
-
 	if noOfRequests == 0 {
-		return nil, []error{errors.New("No requests provided")}
+		return nil, []error{NoRequests}
 	}
+
+	bulkRequest.responses = make([]*http.Response, noOfRequests)
+	bulkRequest.errors = make([]error, noOfRequests)
 
 	ctx, cancel := context.WithTimeout(context.Background(), cl.timeout)
 	defer cancel()
@@ -95,25 +103,35 @@ func (cl *BulkClient) Do(bulkRequest *BulkRequest) ([]*http.Response, []error) {
 }
 
 //CloseAllResponses ...
-func (r *BulkRequest) CloseAllResponses() {
+func (r *RoundTrip) CloseAllResponses() {
 	for _, response := range r.responses {
-		response.Body.Close()
+		if response != nil {
+			response.Body.Close()
+		}
 	}
 }
 
-func (cl *BulkClient) listener(ctx context.Context, bulkRequest *BulkRequest, cancelFunc context.CancelFunc, results chan responseParcel) ([]*http.Response, []error) {
-	done := 0
+func (r *RoundTrip) addRequestIgnoredErrors(doneRequests int) {
+	for i, response := range r.responses {
+		if response == nil && r.errors[i] == nil {
+			r.errors[i] = RequestIgnored
+		}
+	}
+}
 
-        for {
+func (cl *BulkClient) listener(ctx context.Context, bulkRequest *RoundTrip, cancelFunc context.CancelFunc, results chan responseParcel) ([]*http.Response, []error) {
+	done := 0
+	for {
 		select {
 		case <-ctx.Done():
+			bulkRequest.addRequestIgnoredErrors(done)
 			return bulkRequest.responses, bulkRequest.errors
 
-		case ok := <-results:
-			if ok.err != nil {
-				bulkRequest.addError(ok.err)
+		case resParcel := <-results:
+			if resParcel.err != nil {
+				bulkRequest.addError(resParcel.err, resParcel.index)
 			} else {
-				bulkRequest.addResponse(ok.response)
+				bulkRequest.addResponse(resParcel.response, resParcel.index)
 			}
 
 			done++
@@ -125,22 +143,47 @@ func (cl *BulkClient) listener(ctx context.Context, bulkRequest *BulkRequest, ca
 	}
 }
 
-func (cl *BulkClient) produce(ctx context.Context, req *http.Request, results chan responseParcel, i int) {
+func (cl *BulkClient) produce(ctx context.Context, req *http.Request, results chan responseParcel, index int) {
 	resp, err := cl.httpclient.Do(req)
 
-	if err != nil {
-		fmt.Printf("\nHTTP request error'd : %v : %s\n", i, err)
-		results <- responseParcel{err: err}
+	defer func() {
+		if resp != nil { resp.Body.Close() }
+	}()
+
+	if err != nil && (ctx.Err() == context.Canceled || ctx.Err() == context.DeadlineExceeded) {
+		results <- responseParcel{err: RequestIgnored, index: index}
 		return
 	}
 
+	if err != nil {
+		results <- responseParcel{err: fmt.Errorf("http client error: %s", err), index: index}
+		return
+	}
+
+	bs, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		results <- responseParcel{err: fmt.Errorf("error while reading response body: %s", err), index: index}
+		return
+	}
+
+	body := ioutil.NopCloser(bytes.NewReader(bs))
+
+	newResponse := http.Response{
+		Body:       body,
+		StatusCode: resp.StatusCode,
+		Status:     resp.Status,
+		Header:     resp.Header,
+		Request:    req.WithContext(context.Background()),
+	}
+
 	result := responseParcel{
-		response: resp,
-		err:    err,
+		response: &newResponse,
+		err:      err,
+		index:    index,
 	}
 
 	if resp == nil {
-		results <- responseParcel{err: errors.New("No response received")}
+		results <- responseParcel{err: errors.New("no response received"), index: index}
 		return
 	}
 

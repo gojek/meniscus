@@ -7,20 +7,33 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/assert"
 	"io/ioutil"
+	"net/http/httptest"
+	"net/url"
+	"poi-service/httputils"
+	"errors"
 	"fmt"
 )
 
-func TestBulkHTTPClientExecutesRequestsConcurrently(t *testing.T) {
+const (
+	MockServerSlowResponseSleep = 50 * time.Millisecond
+	NonFailingTimeoutValue      = MockServerSlowResponseSleep + time.Second
+	FailingTimeoutValue         = MockServerSlowResponseSleep - 40*time.Millisecond
+)
+
+func TestBulkHTTPClientExecutesRequestsConcurrentlyAndAllRequestsSucceed(t *testing.T) {
 	server := StartMockServer()
-	timeout := 2*time.Second
+	defer server.Close()
+	timeout := NonFailingTimeoutValue
 	httpclient := &http.Client{Timeout: timeout}
 	client := NewBulkHTTPClient(httpclient, timeout)
 	bulkRequest := NewBulkRequest()
 
 	for i := 0; i < 3; i++ {
-		req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:1111?kind=fast", nil)
+		query := url.Values{}
+		query.Set("kind", "fast")
+		req, err := http.NewRequest(http.MethodGet, httputils.EncodeUrl(server.URL, "", query), nil)
 		require.NoError(t, err, "no errors")
-		bulkRequest.Add(req)
+		bulkRequest.AddRequest(req)
 	}
 
 	responses, _ := client.Do(bulkRequest)
@@ -32,26 +45,173 @@ func TestBulkHTTPClientExecutesRequestsConcurrently(t *testing.T) {
 	}
 
 	bulkRequest.CloseAllResponses()
-	server.Shutdown(nil)
 }
 
+func TestBulkHTTPClientReturnsResponsesInOrder(t *testing.T) {
+	server := StartMockServer()
+	defer server.Close()
+	bulkClientTimeout := NonFailingTimeoutValue
+	httpclient := &http.Client{Timeout: NonFailingTimeoutValue}
+	client := NewBulkHTTPClient(httpclient, bulkClientTimeout)
+	bulkRequest := NewBulkRequest()
 
-func StartMockServer() *http.Server {
-	srv := &http.Server{Addr: ":1111"}
-	http.HandleFunc("/", slowOrFastServerHandler)
-	go srv.ListenAndServe()
-	return srv
+	queryFast := url.Values{}
+	queryFast.Set("kind", "fast")
+
+	querySlow := url.Values{}
+	querySlow.Set("kind", "slow")
+
+	reqOne, err := http.NewRequest(http.MethodGet, httputils.EncodeUrl(server.URL, "", querySlow), nil)
+	require.NoError(t, err, "no errors")
+	bulkRequest.AddRequest(reqOne)
+
+	reqTwo, err := http.NewRequest(http.MethodGet, httputils.EncodeUrl(server.URL, "", queryFast), nil)
+	require.NoError(t, err, "no errors")
+	bulkRequest.AddRequest(reqTwo)
+
+	reqThree, err := http.NewRequest(http.MethodGet, httputils.EncodeUrl(server.URL, "", querySlow), nil)
+	require.NoError(t, err, "no errors")
+	bulkRequest.AddRequest(reqThree)
+
+	responses, _ := client.Do(bulkRequest)
+	responseOne, _ := ioutil.ReadAll(responses[0].Body)
+	responseTwo, _ := ioutil.ReadAll(responses[1].Body)
+	responseThree, _ := ioutil.ReadAll(responses[2].Body)
+
+	assert.Equal(t, "slow", string(responseOne))
+	assert.Equal(t, "fast", string(responseTwo))
+	assert.Equal(t, "slow", string(responseThree))
+
+	bulkRequest.CloseAllResponses()
+}
+
+func TestBulkHTTPClientAllRequestsFailDueToBulkClientContextTimeout(t *testing.T) {
+	server := StartMockServer()
+	defer server.Close()
+	bulkClientTimeout := FailingTimeoutValue
+	httpclient := &http.Client{Timeout: NonFailingTimeoutValue}
+	client := NewBulkHTTPClient(httpclient, bulkClientTimeout)
+	bulkRequest := NewBulkRequest()
+
+	queryFast := url.Values{}
+	queryFast.Set("kind", "fast")
+
+	querySlow := url.Values{}
+	querySlow.Set("kind", "slow")
+
+	reqOne, err := http.NewRequest(http.MethodGet, httputils.EncodeUrl(server.URL, "", querySlow), nil)
+	require.NoError(t, err, "no errors")
+	bulkRequest.AddRequest(reqOne)
+
+	reqTwo, err := http.NewRequest(http.MethodGet, httputils.EncodeUrl(server.URL, "", querySlow), nil)
+	require.NoError(t, err, "no errors")
+	bulkRequest.AddRequest(reqTwo)
+
+	reqThree, err := http.NewRequest(http.MethodGet, httputils.EncodeUrl(server.URL, "", queryFast), nil)
+	require.NoError(t, err, "no errors")
+	bulkRequest.AddRequest(reqThree)
+
+	responses, errors := client.Do(bulkRequest)
+
+	assert.Nil(t, responses[0])
+	assert.Equal(t, RequestIgnored, errors[0])
+
+	assert.Nil(t, responses[1])
+	assert.Equal(t, RequestIgnored, errors[1])
+
+	assert.NotNil(t, responses[2])
+	assert.Nil(t, errors[2])
+
+	bulkRequest.CloseAllResponses()
+}
+
+func TestBulkHTTPClientAllRequestsFailDueToHTTPClientTimeout(t *testing.T) {
+	server := StartMockServer()
+	defer server.Close()
+	bulkClientTimeout := NonFailingTimeoutValue
+	httpclient := &http.Client{Timeout: FailingTimeoutValue}
+	client := NewBulkHTTPClient(httpclient, bulkClientTimeout)
+	bulkRequest := NewBulkRequest()
+
+	queryFast := url.Values{}
+	queryFast.Set("kind", "fast")
+
+	querySlow := url.Values{}
+	querySlow.Set("kind", "slow")
+
+	reqOne, err := http.NewRequest(http.MethodGet, httputils.EncodeUrl(server.URL, "", querySlow), nil)
+	require.NoError(t, err, "no errors")
+	bulkRequest.AddRequest(reqOne)
+
+	reqTwo, err := http.NewRequest(http.MethodGet, httputils.EncodeUrl(server.URL, "", querySlow), nil)
+	require.NoError(t, err, "no errors")
+	bulkRequest.AddRequest(reqTwo)
+
+	responses, errs := client.Do(bulkRequest)
+
+	expectedClientTimeoutError := fmt.Errorf("http client error: Get %s?kind=slow: net/http: request canceled (Client.Timeout exceeded while awaiting headers)", server.URL)
+
+	assert.Equal(t, []*http.Response{nil, nil}, responses)
+	for _, e := range errs {
+		assert.Equal(t, expectedClientTimeoutError, e)
+	}
+
+	bulkRequest.CloseAllResponses()
+}
+
+func TestBulkHTTPClientSomeRequestsTimeoutAndOthersSucceedOrFail(t *testing.T) {
+	server := StartMockServer()
+	defer server.Close()
+	bulkClientTimeout := FailingTimeoutValue
+	httpclient := &http.Client{Timeout: NonFailingTimeoutValue}
+	client := NewBulkHTTPClient(httpclient, bulkClientTimeout)
+	bulkRequest := NewBulkRequest()
+
+	queryFast := url.Values{}
+	queryFast.Set("kind", "fast")
+
+	querySlow := url.Values{}
+	querySlow.Set("kind", "slow")
+
+	reqOne, err := http.NewRequest(http.MethodGet, httputils.EncodeUrl(server.URL, "", querySlow), nil)
+	require.NoError(t, err, "no errors")
+	bulkRequest.AddRequest(reqOne)    // bulk client timeout exceeded
+
+	reqTwo, err := http.NewRequest(http.MethodGet, httputils.EncodeUrl(server.URL, "", queryFast), nil)
+	require.NoError(t, err, "no errors")
+	bulkRequest.AddRequest(reqTwo)    // success
+
+	reqThree, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	require.NoError(t, err, "no errors")
+	reqThree.URL = nil
+	bulkRequest.AddRequest(reqThree)  // http client error failure
+
+	responses, errs := client.Do(bulkRequest)
+	defer bulkRequest.CloseAllResponses()
+	successResponse, _ := ioutil.ReadAll(responses[1].Body)
+
+	assert.Equal(t, "fast", string(successResponse))
+	assert.Equal(t, RequestIgnored, errs[0])
+	assert.Equal(t, errors.New("http client error: http: nil Request.URL") , errs[2])
+}
+
+func StartMockServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(slowOrFastServerHandler))
 }
 
 func slowOrFastServerHandler(w http.ResponseWriter, req *http.Request) {
 	slowOrFast := req.URL.Query().Get("kind")
-
-	if slowOrFast == "slow" {
-		time.Sleep(1 * time.Second)
-		fmt.Fprintf(w, slowOrFast)
+	if len(slowOrFast) == 0 {
+		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
 
-	fmt.Fprintf(w, slowOrFast)
+	if slowOrFast == "slow" {
+		time.Sleep(MockServerSlowResponseSleep)
+		w.Write([]byte(slowOrFast))
+		return
+	}
+
+	w.Write([]byte(slowOrFast))
 	return
 }
