@@ -113,10 +113,10 @@ func TestBulkHTTPClientAllRequestsFailDueToBulkClientContextTimeout(t *testing.T
 	responses, errors := client.Do(bulkRequest)
 
 	assert.Nil(t, responses[0])
-	assert.Equal(t, RequestIgnored, errors[0])
+	assert.Equal(t, ErrRequestIgnored, errors[0])
 
 	assert.Nil(t, responses[1])
-	assert.Equal(t, RequestIgnored, errors[1])
+	assert.Equal(t, ErrRequestIgnored, errors[1])
 
 	assert.NotNil(t, responses[2])
 	assert.Nil(t, errors[2])
@@ -190,7 +190,7 @@ func TestBulkHTTPClientSomeRequestsTimeoutAndOthersSucceedOrFail(t *testing.T) {
 	successResponse, _ := ioutil.ReadAll(responses[1].Body)
 
 	assert.Equal(t, "fast", string(successResponse))
-	assert.Equal(t, RequestIgnored, errs[0])
+	assert.Equal(t, ErrRequestIgnored, errs[0])
 	assert.Equal(t, errors.New("http client error: http: nil Request.URL"), errs[2])
 }
 
@@ -215,6 +215,6 @@ func slowOrFastServerHandler(w http.ResponseWriter, req *http.Request) {
 	return
 }
 
-func encodeURL(baseUrl string, endpoint string, queryParams url.Values) string {
-	return fmt.Sprintf("%s%s?%s", baseUrl, endpoint, queryParams.Encode())
+func encodeURL(baseURL string, endpoint string, queryParams url.Values) string {
+	return fmt.Sprintf("%s%s?%s", baseURL, endpoint, queryParams.Encode())
 }

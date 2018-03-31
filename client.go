@@ -10,9 +10,6 @@ import (
 	"bytes"
 )
 
-var RequestIgnored = errors.New("request ignored")
-var NoRequests = errors.New("no requests provided")
-
 //HTTPClient ...
 type HTTPClient interface {
 	Do(*http.Request) (*http.Response, error)
@@ -36,7 +33,19 @@ type RoundTrip struct {
 	errors    []error
 }
 
+//ErrNoRequests ...
+var ErrNoRequests = errors.New("no requests provided")
+
+//ErrRequestIgnored ...
+var ErrRequestIgnored = errors.New("request ignored")
+
+type requestParcel struct {
+	request *http.Request
+	index    int
+}
+
 type responseParcel struct {
+	req      *http.Request // this is required to recreate a http.Response with a new http.Request without a context
 	response *http.Response
 	err      error
 	index    int
@@ -64,29 +73,11 @@ func (r *RoundTrip) AddRequest(request *http.Request) *RoundTrip {
 	return r
 }
 
-//addResponse
-//This is ostensibly thread-safe because only the specific indices of the arrays are being updated
-//Which is why we don't require a channel or a mutex
-func (r *RoundTrip) updateResponseForIndex(response *http.Response, index int) *RoundTrip {
-	r.responses[index] = response
-	r.errors[index] = nil
-	return r
-}
-
-//addErrors
-//This is ostensibly thread-safe because only the specific indices of the array are being updated
-//Which is why we don't require a channel or a mutex
-func (r *RoundTrip) updateErrorForIndex(err error, index int) *RoundTrip {
-	r.errors[index] = err
-	r.responses[index] = nil
-	return r
-}
-
 //Do ...
 func (cl *BulkClient) Do(bulkRequest *RoundTrip) ([]*http.Response, []error) {
 	noOfRequests := len(bulkRequest.requests)
 	if noOfRequests == 0 {
-		return nil, []error{NoRequests}
+		return nil, []error{ErrNoRequests}
 	}
 
 	bulkRequest.responses = make([]*http.Response, noOfRequests)
@@ -95,16 +86,29 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip) ([]*http.Response, []error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cl.timeout)
 	defer cancel()
 
-	results := make(chan responseParcel, noOfRequests)
-	doneRequests := make(chan int, noOfRequests)
+	requestList := make(chan requestParcel)
+	recievedResponses := make(chan responseParcel)
+	processedResponses := make(chan responseParcel)
+
+	for nWorker := 0; nWorker < 10; nWorker++ {
+		go cl.fireRequests(requestList, recievedResponses)
+	}
+
+	for mWorker := 0; mWorker < 10; mWorker++ {
+		go cl.processRequests(ctx, recievedResponses, processedResponses)
+	}
 
 	for index, req := range bulkRequest.requests {
 		bulkRequest.requests[index] = req.WithContext(ctx)
-		go cl.makeRequest(ctx, bulkRequest.requests[index], results, index)
-		go cl.responseListener(bulkRequest, results, doneRequests)
+		reqParcel := requestParcel{
+			request: bulkRequest.requests[index],
+			index: index,
+		}
+
+		requestList <- reqParcel
 	}
 
-	return cl.completionListener(ctx, bulkRequest, results, doneRequests)
+	return cl.completionListener(ctx, bulkRequest, processedResponses)
 }
 
 //CloseAllResponses ...
@@ -116,31 +120,20 @@ func (r *RoundTrip) CloseAllResponses() {
 	}
 }
 
-func (r *RoundTrip) addRequestIgnoredErrors() {
-	for i, response := range r.responses {
-		if response == nil && r.errors[i] == nil {
-			r.errors[i] = RequestIgnored
-		}
-	}
-}
-
-func (cl *BulkClient) responseListener(bulkRequest *RoundTrip, results chan responseParcel, doneRequestIds chan int) {
-	resParcel := <-results
-	if resParcel.err != nil {
-		bulkRequest.updateErrorForIndex(resParcel.err, resParcel.index)
-	} else {
-		bulkRequest.updateResponseForIndex(resParcel.response, resParcel.index)
-	}
-
-	doneRequestIds <- resParcel.index
-}
-
-func (cl *BulkClient) completionListener(ctx context.Context, bulkRequest *RoundTrip, results chan responseParcel, doneRequestIds chan int) ([]*http.Response, []error) {
+func (cl *BulkClient) completionListener(ctx context.Context, bulkRequest *RoundTrip, processedResponses <-chan responseParcel) ([]*http.Response, []error) {
 	LOOP:
-	for len(doneRequestIds) < len(bulkRequest.requests) {
+	for done := 0; done < len(bulkRequest.requests); {
 		select {
 		case <-ctx.Done():
 			break LOOP
+		case resParcel := <-processedResponses:
+			if resParcel.err != nil {
+				bulkRequest.updateErrorForIndex(resParcel.err, resParcel.index)
+			} else {
+				bulkRequest.updateResponseForIndex(resParcel.response, resParcel.index)
+			}
+
+			done++
 		}
 	}
 
@@ -148,51 +141,104 @@ func (cl *BulkClient) completionListener(ctx context.Context, bulkRequest *Round
 	return bulkRequest.responses, bulkRequest.errors
 }
 
-func (cl *BulkClient) makeRequest(ctx context.Context, req *http.Request, results chan responseParcel, index int) {
-	resp, err := cl.httpclient.Do(req)
+func (r *RoundTrip) addRequestIgnoredErrors() {
+	for i, response := range r.responses {
+		if response == nil && r.errors[i] == nil {
+			r.errors[i] = ErrRequestIgnored
+		}
+	}
+}
 
+func (r *RoundTrip) updateResponseForIndex(response *http.Response, index int) *RoundTrip {
+	r.responses[index] = response
+	r.errors[index] = nil
+	return r
+}
+
+func (r *RoundTrip) updateErrorForIndex(err error, index int) *RoundTrip {
+	r.errors[index] = err
+	r.responses[index] = nil
+	return r
+}
+
+func (cl *BulkClient) fireRequests(reqList <-chan requestParcel, receivedResponses chan<- responseParcel) {
+	LOOP:
+	for {
+		select {
+		case reqParcel, isChanOpen := <-reqList:
+			if !isChanOpen {
+				break LOOP
+			}
+
+			receivedResponses <- cl.executeRequest(reqParcel)
+		}
+	}
+}
+
+func (cl *BulkClient) executeRequest(reqParcel requestParcel) responseParcel {
+	resp, err := cl.httpclient.Do(reqParcel.request)
+
+	return responseParcel{
+		req:      reqParcel.request,
+		response: resp,
+		err:      err,
+		index:    reqParcel.index,
+	}
+}
+
+func (cl *BulkClient) processRequests(ctx context.Context, resList <-chan responseParcel, processedResponses chan<- responseParcel) {
+	LOOP:
+	for {
+		select {
+		case resParcel, isChanOpen := <-resList:
+			if !isChanOpen {
+				break LOOP
+			}
+
+			processedResponses <- cl.parseResponse(ctx, resParcel)
+		}
+	}
+}
+
+func (cl *BulkClient) parseResponse(ctx context.Context, res responseParcel) responseParcel {
 	defer func() {
-		if resp != nil {
-			resp.Body.Close()
+		if res.response != nil {
+			res.response.Body.Close()
 		}
 	}()
 
-	if err != nil && (ctx.Err() == context.Canceled || ctx.Err() == context.DeadlineExceeded) {
-		results <- responseParcel{err: RequestIgnored, index: index}
-		return
+	if res.err != nil && (ctx.Err() == context.Canceled || ctx.Err() == context.DeadlineExceeded) {
+		return responseParcel{err: ErrRequestIgnored, index: res.index}
 	}
 
-	if err != nil {
-		results <- responseParcel{err: fmt.Errorf("http client error: %s", err), index: index}
-		return
+	if res.err != nil {
+		return responseParcel{err: fmt.Errorf("http client error: %s", res.err), index: res.index}
 	}
 
-	bs, err := ioutil.ReadAll(resp.Body)
+	if res.response == nil {
+		return responseParcel{err: errors.New("no response received"), index: res.index}
+	}
+
+	bs, err := ioutil.ReadAll(res.response.Body)
 	if err != nil {
-		results <- responseParcel{err: fmt.Errorf("error while reading response body: %s", err), index: index}
-		return
+		return responseParcel{err: fmt.Errorf("error while reading response body: %s", err), index: res.index}
 	}
 
 	body := ioutil.NopCloser(bytes.NewReader(bs))
 
 	newResponse := http.Response{
 		Body:       body,
-		StatusCode: resp.StatusCode,
-		Status:     resp.Status,
-		Header:     resp.Header,
-		Request:    req.WithContext(context.Background()),
+		StatusCode: res.response.StatusCode,
+		Status:     res.response.Status,
+		Header:     res.response.Header,
+		Request:    res.req.WithContext(context.Background()),
 	}
 
 	result := responseParcel{
 		response: &newResponse,
 		err:      err,
-		index:    index,
+		index:    res.index,
 	}
 
-	if resp == nil {
-		results <- responseParcel{err: errors.New("no response received"), index: index}
-		return
-	}
-
-	results <- result
+	return result
 }
