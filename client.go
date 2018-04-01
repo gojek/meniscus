@@ -83,6 +83,8 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip) ([]*http.Response, []error) {
 	bulkRequest.responses = make([]*http.Response, noOfRequests)
 	bulkRequest.errors    = make([]error, noOfRequests)
 
+	// TODO:
+	// Close these channels eventually
 	requestList        := make(chan requestParcel)
 	recievedResponses  := make(chan roundTripParcel)
 	processedResponses := make(chan roundTripParcel)
@@ -98,6 +100,10 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip) ([]*http.Response, []error) {
 		go cl.processRequests(ctx, recievedResponses, processedResponses)
 	}
 
+	// TODO:
+	// A context cancel in the listener may not be noticed until these requests are fired into the requestList chan
+	// Simply making it a goroutine wouldn't help either, since it would race on bulkRequest
+	// Introduce a mutex on bulkRequest maybe?
 	for index, req := range bulkRequest.requests {
 		bulkRequest.requests[index] = req.WithContext(ctx)
 		reqParcel := requestParcel{
@@ -184,6 +190,10 @@ func (cl *BulkClient) processRequests(ctx context.Context, resList <-chan roundT
 	}
 }
 
+// Parse and recreate a Response object with a new Request object (without a timeout).
+// It is easy to read from the response object later after we're done processing all requests or we timeout.
+// We do not want to be reading from a response for which the request has been canceled.
+// We simply close the original response at the end of this function.
 func (cl *BulkClient) parseResponse(ctx context.Context, res roundTripParcel) roundTripParcel {
 	defer func() {
 		if res.response != nil {
