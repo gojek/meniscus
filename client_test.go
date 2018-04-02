@@ -35,7 +35,7 @@ func TestBulkHTTPClientExecutesRequestsConcurrentlyAndAllRequestsSucceed(t *test
 		bulkRequest.AddRequest(req)
 	}
 
-	responses, _ := client.Do(bulkRequest)
+	responses, _ := client.Do(bulkRequest, 10, 10)
 	for _, resp := range responses {
 		resByte, e := ioutil.ReadAll(resp.Body)
 
@@ -72,7 +72,7 @@ func TestBulkHTTPClientReturnsResponsesInOrder(t *testing.T) {
 	require.NoError(t, err, "no errors")
 	bulkRequest.AddRequest(reqThree)
 
-	responses, _ := client.Do(bulkRequest)
+	responses, _ := client.Do(bulkRequest, 10, 10)
 	responseOne, _ := ioutil.ReadAll(responses[0].Body)
 	responseTwo, _ := ioutil.ReadAll(responses[1].Body)
 	responseThree, _ := ioutil.ReadAll(responses[2].Body)
@@ -110,7 +110,7 @@ func TestBulkHTTPClientAllRequestsFailDueToBulkClientContextTimeout(t *testing.T
 	require.NoError(t, err, "no errors")
 	bulkRequest.AddRequest(reqThree)
 
-	responses, errors := client.Do(bulkRequest)
+	responses, errors := client.Do(bulkRequest, 10, 10)
 
 	assert.Nil(t, responses[0])
 	assert.Equal(t, ErrRequestIgnored, errors[0])
@@ -146,7 +146,7 @@ func TestBulkHTTPClientAllRequestsFailDueToHTTPClientTimeout(t *testing.T) {
 	require.NoError(t, err, "no errors")
 	bulkRequest.AddRequest(reqTwo)
 
-	responses, errs := client.Do(bulkRequest)
+	responses, errs := client.Do(bulkRequest, 10, 10)
 
 	expectedClientTimeoutError := fmt.Errorf("http client error: Get %s?kind=slow: net/http: request canceled (Client.Timeout exceeded while awaiting headers)", server.URL)
 
@@ -185,7 +185,7 @@ func TestBulkHTTPClientSomeRequestsTimeoutAndOthersSucceedOrFail(t *testing.T) {
 	reqThree.URL = nil
 	bulkRequest.AddRequest(reqThree) // http client error failure
 
-	responses, errs := client.Do(bulkRequest)
+	responses, errs := client.Do(bulkRequest, 10, 10)
 	defer bulkRequest.CloseAllResponses()
 	successResponse, _ := ioutil.ReadAll(responses[1].Body)
 

@@ -74,7 +74,7 @@ func (r *RoundTrip) AddRequest(request *http.Request) *RoundTrip {
 }
 
 //Do ...
-func (cl *BulkClient) Do(bulkRequest *RoundTrip) ([]*http.Response, []error) {
+func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, processResponseWorkers int) ([]*http.Response, []error) {
 	noOfRequests := len(bulkRequest.requests)
 	if noOfRequests == 0 {
 		return nil, []error{ErrNoRequests}
@@ -89,14 +89,14 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip) ([]*http.Response, []error) {
 	recievedResponses  := make(chan roundTripParcel)
 	processedResponses := make(chan roundTripParcel)
 
-	for nWorker := 0; nWorker < 10; nWorker++ {
+	for nWorker := 0; nWorker < fireRequestsWorkers; nWorker++ {
 		go cl.fireRequests(requestList, recievedResponses)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cl.timeout)
 	defer cancel()
 
-	for mWorker := 0; mWorker < 10; mWorker++ {
+	for mWorker := 0; mWorker < processResponseWorkers; mWorker++ {
 		go cl.processRequests(ctx, recievedResponses, processedResponses)
 	}
 
