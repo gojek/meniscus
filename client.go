@@ -83,21 +83,20 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, proces
 	bulkRequest.responses = make([]*http.Response, noOfRequests)
 	bulkRequest.errors    = make([]error, noOfRequests)
 
-	// TODO:
-	// Close these channels eventually
 	requestList        := make(chan requestParcel)
 	recievedResponses  := make(chan roundTripParcel)
 	processedResponses := make(chan roundTripParcel)
+	stopProcessing     := make(chan struct{})
 
 	for nWorker := 0; nWorker < fireRequestsWorkers; nWorker++ {
-		go cl.fireRequests(requestList, recievedResponses)
+		go cl.fireRequests(requestList, recievedResponses, stopProcessing)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cl.timeout)
 	defer cancel()
 
 	for mWorker := 0; mWorker < processResponseWorkers; mWorker++ {
-		go cl.processRequests(ctx, recievedResponses, processedResponses)
+		go cl.processRequests(ctx, recievedResponses, processedResponses, stopProcessing)
 	}
 
 	// TODO:
@@ -114,7 +113,11 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, proces
 		requestList <- reqParcel
 	}
 
-	return cl.completionListener(ctx, bulkRequest, processedResponses)
+	cl.completionListener(ctx, bulkRequest, processedResponses)
+	close(stopProcessing)
+	bulkRequest.addRequestIgnoredErrors()
+
+	return bulkRequest.responses, bulkRequest.errors
 }
 
 //CloseAllResponses ...
@@ -126,8 +129,8 @@ func (r *RoundTrip) CloseAllResponses() {
 	}
 }
 
-func (cl *BulkClient) completionListener(ctx context.Context, bulkRequest *RoundTrip, processedResponses <-chan roundTripParcel) ([]*http.Response, []error) {
-	LOOP:
+func (cl *BulkClient) completionListener(ctx context.Context, bulkRequest *RoundTrip, processedResponses <-chan roundTripParcel) {
+LOOP:
 	for done := 0; done < len(bulkRequest.requests); {
 		select {
 		case <-ctx.Done():
@@ -142,9 +145,6 @@ func (cl *BulkClient) completionListener(ctx context.Context, bulkRequest *Round
 			done++
 		}
 	}
-
-	bulkRequest.addRequestIgnoredErrors()
-	return bulkRequest.responses, bulkRequest.errors
 }
 
 func (r *RoundTrip) addRequestIgnoredErrors() {
@@ -167,9 +167,12 @@ func (r *RoundTrip) updateErrorForIndex(err error, index int) *RoundTrip {
 	return r
 }
 
-func (cl *BulkClient) fireRequests(reqList <-chan requestParcel, receivedResponses chan<- roundTripParcel) {
+func (cl *BulkClient) fireRequests(reqList <-chan requestParcel, receivedResponses chan<- roundTripParcel, stopProcessing <-chan struct{}) {
 	for reqParcel := range reqList {
-		receivedResponses <- cl.executeRequest(reqParcel)
+		select {
+		case <-stopProcessing: return
+		default: receivedResponses <- cl.executeRequest(reqParcel)
+		}
 	}
 }
 
@@ -184,9 +187,12 @@ func (cl *BulkClient) executeRequest(reqParcel requestParcel) roundTripParcel {
 	}
 }
 
-func (cl *BulkClient) processRequests(ctx context.Context, resList <-chan roundTripParcel, processedResponses chan<- roundTripParcel) {
+func (cl *BulkClient) processRequests(ctx context.Context, resList <-chan roundTripParcel, processedResponses chan<- roundTripParcel, stopProcessing <-chan struct{}) {
 	for resParcel := range resList {
-		processedResponses <- cl.parseResponse(ctx, resParcel)
+		select {
+		case <-stopProcessing: return
+		default: processedResponses <- cl.parseResponse(ctx, resParcel)
+		}
 	}
 }
 
