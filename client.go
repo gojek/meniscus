@@ -29,9 +29,11 @@ type BulkClient struct {
 
 //RoundTrip ...
 type RoundTrip struct {
+	sync.RWMutex
 	requests  []*http.Request
 	responses []*http.Response
 	errors    []error
+	finished  *AtomicBool
 }
 
 //ErrNoRequests ...
@@ -65,6 +67,7 @@ func NewBulkRequest() *RoundTrip {
 	return &RoundTrip{
 		requests:  []*http.Request{},
 		responses: []*http.Response{},
+		finished:  NewAtomicBool(),
 	}
 }
 
@@ -98,7 +101,8 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, proces
 
 	var waitForCompletionListener sync.WaitGroup
 	waitForCompletionListener.Add(1)
-	go cl.completionListener(ctx, &waitForCompletionListener, bulkRequest, processedResponses)
+	go cl.completionListener(ctx, &waitForCompletionListener, bulkRequest)
+	go cl.responseMux(bulkRequest, processedResponses)
 
 	for nWorker := 0; nWorker < fireRequestsWorkers; nWorker++ {
 		go cl.fireRequests(requestList, recievedResponses, stopProcessing)
@@ -108,12 +112,14 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, proces
 		go cl.processRequests(ctx, recievedResponses, processedResponses, stopProcessing)
 	}
 
-	go cl.publishAllRequests(bulkRequest, requestList)
+	go bulkRequest.publishAllRequests(requestList)
 
 	waitForCompletionListener.Wait()
 	close(stopProcessing)
-	bulkRequest.addRequestIgnoredErrors()
 
+	bulkRequest.RLock()
+	defer bulkRequest.RUnlock()
+	bulkRequest.addRequestIgnoredErrors()
 	return bulkRequest.responses, bulkRequest.errors
 }
 
@@ -126,10 +132,13 @@ func (r *RoundTrip) CloseAllResponses() {
 	}
 }
 
-func (cl *BulkClient) publishAllRequests(bulkRequest *RoundTrip, requestList chan<- requestParcel) {
-	for index := range bulkRequest.requests {
+func (r *RoundTrip) publishAllRequests(requestList chan<- requestParcel) {
+	r.RLock()
+	defer r.RUnlock()
+
+	for index := range r.requests {
 		reqParcel := requestParcel{
-			request: bulkRequest.requests[index],
+			request: r.requests[index],
 			index:   index,
 		}
 
@@ -137,24 +146,34 @@ func (cl *BulkClient) publishAllRequests(bulkRequest *RoundTrip, requestList cha
 	}
 }
 
-func (cl *BulkClient) completionListener(ctx context.Context, waitForCompletionListener *sync.WaitGroup, bulkRequest *RoundTrip, processedResponses <-chan roundTripParcel) {
+func (cl *BulkClient) completionListener(ctx context.Context, waitForCompletionListener *sync.WaitGroup, bulkRequest *RoundTrip) {
 LOOP:
-	for done := 0; done < len(bulkRequest.requests); {
+	for {
 		select {
 		case <-ctx.Done():
+			bulkRequest.finished.Set()
 			break LOOP
+		}
+	}
+
+	defer waitForCompletionListener.Done()
+}
+
+func (cl *BulkClient) responseMux(bulkRequest *RoundTrip, processedResponses <-chan roundTripParcel) {
+	for done := 0; done < len(bulkRequest.requests); {
+		select {
 		case resParcel := <-processedResponses:
-			if resParcel.err != nil {
-				bulkRequest.updateErrorForIndex(resParcel.err, resParcel.index)
-			} else {
-				bulkRequest.updateResponseForIndex(resParcel.response, resParcel.index)
+			if !bulkRequest.finished.IsSet() {
+				if resParcel.err != nil {
+					bulkRequest.updateErrorForIndex(resParcel.err, resParcel.index)
+				} else {
+					bulkRequest.updateResponseForIndex(resParcel.response, resParcel.index)
+				}
 			}
 
 			done++
 		}
 	}
-
-	waitForCompletionListener.Done()
 }
 
 func (r *RoundTrip) addRequestIgnoredErrors() {
@@ -166,12 +185,18 @@ func (r *RoundTrip) addRequestIgnoredErrors() {
 }
 
 func (r *RoundTrip) updateResponseForIndex(response *http.Response, index int) *RoundTrip {
+	r.Lock()
+	defer r.Unlock()
+
 	r.responses[index] = response
 	r.errors[index] = nil
 	return r
 }
 
 func (r *RoundTrip) updateErrorForIndex(err error, index int) *RoundTrip {
+	r.Lock()
+	defer r.Unlock()
+
 	r.errors[index] = err
 	r.responses[index] = nil
 	return r
