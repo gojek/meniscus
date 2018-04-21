@@ -36,6 +36,9 @@ func TestBulkHTTPClientExecutesRequestsConcurrentlyAndAllRequestsSucceed(t *test
 	}
 
 	responses, _ := client.Do(bulkRequest, 10, 10)
+
+	assert.Equal(t, 3, len(responses))
+
 	for _, resp := range responses {
 		resByte, e := ioutil.ReadAll(resp.Body)
 
@@ -190,8 +193,10 @@ func TestBulkHTTPClientSomeRequestsTimeoutAndOthersSucceedOrFailWithManyRequestW
 	reqFour.URL = nil
 	bulkRequest.AddRequest(reqFour) // http client error failure
 
-	responses, errs := client.Do(bulkRequest, 2, 1)
+	responses, errs := client.Do(bulkRequest, 2, 2)
 	defer bulkRequest.CloseAllResponses()
+
+	assert.Equal(t, 4, len(responses))
 	successResponse, _ := ioutil.ReadAll(responses[1].Body)
 
 	assert.Equal(t, "fast", string(successResponse))

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"sync"
 	"time"
 )
 
@@ -29,11 +28,9 @@ type BulkClient struct {
 
 //RoundTrip ...
 type RoundTrip struct {
-	sync.RWMutex
 	requests  []*http.Request
 	responses []*http.Response
 	errors    []error
-	finished  *AtomicBool
 }
 
 //ErrNoRequests ...
@@ -67,7 +64,6 @@ func NewBulkRequest() *RoundTrip {
 	return &RoundTrip{
 		requests:  []*http.Request{},
 		responses: []*http.Response{},
-		finished:  NewAtomicBool(),
 	}
 }
 
@@ -90,6 +86,7 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, proces
 	requestList := make(chan requestParcel)
 	recievedResponses := make(chan roundTripParcel)
 	processedResponses := make(chan roundTripParcel)
+	collectResponses := make(chan []roundTripParcel)
 	stopProcessing := make(chan struct{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), cl.timeout)
@@ -99,10 +96,7 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, proces
 		bulkRequest.requests[index] = req.WithContext(ctx)
 	}
 
-	var waitForCompletionListener sync.WaitGroup
-	waitForCompletionListener.Add(1)
-	go cl.completionListener(ctx, &waitForCompletionListener, bulkRequest)
-	go cl.responseMux(bulkRequest, processedResponses)
+	go cl.responseMux(ctx, bulkRequest, processedResponses, collectResponses)
 
 	for nWorker := 0; nWorker < fireRequestsWorkers; nWorker++ {
 		go cl.fireRequests(requestList, recievedResponses, stopProcessing)
@@ -114,13 +108,10 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, proces
 
 	go bulkRequest.publishAllRequests(requestList)
 
-	waitForCompletionListener.Wait()
+	cl.completionListener(bulkRequest, collectResponses)
+
 	close(stopProcessing)
 
-	// bulkRequest.RLock()
-	// defer bulkRequest.RUnlock()
-
-	bulkRequest.addRequestIgnoredErrors()
 	return bulkRequest.responses, bulkRequest.errors
 }
 
@@ -144,40 +135,44 @@ func (r *RoundTrip) publishAllRequests(requestList chan<- requestParcel) {
 	}
 }
 
-func (cl *BulkClient) completionListener(ctx context.Context, waitForCompletionListener *sync.WaitGroup, bulkRequest *RoundTrip) {
-LOOP:
-	for {
-		select {
-		case <-ctx.Done():
-			bulkRequest.finished.Set()
-			break LOOP
+func (cl *BulkClient) completionListener(bulkRequest *RoundTrip, collectResponses <-chan []roundTripParcel) {
+	for _, resParcel := range <-collectResponses {
+		if resParcel.err != nil {
+			bulkRequest.updateErrorForIndex(resParcel.err, resParcel.index)
+		} else {
+			bulkRequest.updateResponseForIndex(resParcel.response, resParcel.index)
 		}
 	}
 
-	defer waitForCompletionListener.Done()
+	bulkRequest.addRequestIgnoredErrors()
 }
 
-func (cl *BulkClient) responseMux(bulkRequest *RoundTrip, processedResponses <-chan roundTripParcel) {
+func (cl *BulkClient) responseMux(ctx context.Context, bulkRequest *RoundTrip, processedResponses <-chan roundTripParcel, collectResponses chan<- []roundTripParcel) {
+	var arrayOfResponses []roundTripParcel
+	var writtenOnce bool
+
 	for done := 0; done < len(bulkRequest.requests); {
 		select {
-		case resParcel := <-processedResponses:
-			if !bulkRequest.finished.IsSet() {
-				if resParcel.err != nil {
-					bulkRequest.updateErrorForIndex(resParcel.err, resParcel.index)
-				} else {
-					bulkRequest.updateResponseForIndex(resParcel.response, resParcel.index)
-				}
+		case <-ctx.Done():
+			if !writtenOnce {
+				collectResponses <- arrayOfResponses
+				writtenOnce = true
 			}
 
+		case resParcel := <-processedResponses:
+			arrayOfResponses = append(arrayOfResponses, resParcel)
 			done++
 		}
+
+	}
+
+	if !writtenOnce {
+		collectResponses <- arrayOfResponses
+		writtenOnce = true
 	}
 }
 
 func (r *RoundTrip) addRequestIgnoredErrors() {
-	r.Lock()
-	defer r.Unlock()
-
 	for i, response := range r.responses {
 		if response == nil && r.errors[i] == nil {
 			r.errors[i] = ErrRequestIgnored
@@ -186,18 +181,12 @@ func (r *RoundTrip) addRequestIgnoredErrors() {
 }
 
 func (r *RoundTrip) updateResponseForIndex(response *http.Response, index int) *RoundTrip {
-	r.Lock()
-	defer r.Unlock()
-
 	r.responses[index] = response
 	r.errors[index] = nil
 	return r
 }
 
 func (r *RoundTrip) updateErrorForIndex(err error, index int) *RoundTrip {
-	r.Lock()
-	defer r.Unlock()
-
 	r.errors[index] = err
 	r.responses[index] = nil
 	return r
