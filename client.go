@@ -117,8 +117,9 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, proces
 	waitForCompletionListener.Wait()
 	close(stopProcessing)
 
-	bulkRequest.RLock()
-	defer bulkRequest.RUnlock()
+	// bulkRequest.RLock()
+	// defer bulkRequest.RUnlock()
+
 	bulkRequest.addRequestIgnoredErrors()
 	return bulkRequest.responses, bulkRequest.errors
 }
@@ -133,9 +134,6 @@ func (r *RoundTrip) CloseAllResponses() {
 }
 
 func (r *RoundTrip) publishAllRequests(requestList chan<- requestParcel) {
-	r.RLock()
-	defer r.RUnlock()
-
 	for index := range r.requests {
 		reqParcel := requestParcel{
 			request: r.requests[index],
@@ -177,6 +175,9 @@ func (cl *BulkClient) responseMux(bulkRequest *RoundTrip, processedResponses <-c
 }
 
 func (r *RoundTrip) addRequestIgnoredErrors() {
+	r.Lock()
+	defer r.Unlock()
+
 	for i, response := range r.responses {
 		if response == nil && r.errors[i] == nil {
 			r.errors[i] = ErrRequestIgnored

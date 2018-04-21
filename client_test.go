@@ -203,7 +203,7 @@ func TestBulkHTTPClientSomeRequestsTimeoutAndOthersSucceedOrFailWithManyRequestW
 func TestBulkHTTPClientSomeRequestsTimeoutAndOthersSucceedOrFailWithOneRequestWorker(t *testing.T) {
 	server := StartMockServer()
 	defer server.Close()
-	bulkClientTimeout := FailingTimeoutValue
+	bulkClientTimeout := 10 * time.Second
 	httpclient := &http.Client{Timeout: NonFailingTimeoutValue}
 	client := NewBulkHTTPClient(httpclient, bulkClientTimeout)
 	bulkRequest := NewBulkRequest()
