@@ -88,6 +88,7 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, proces
 	processedResponses := make(chan roundTripParcel)
 	collectResponses := make(chan []roundTripParcel)
 	stopProcessing := make(chan struct{})
+	defer close(stopProcessing)
 
 	ctx, cancel := context.WithTimeout(context.Background(), cl.timeout)
 	defer cancel()
@@ -109,8 +110,6 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, proces
 	go bulkRequest.publishAllRequests(requestList)
 
 	cl.completionListener(bulkRequest, collectResponses)
-
-	close(stopProcessing)
 
 	return bulkRequest.responses, bulkRequest.errors
 }
@@ -225,7 +224,7 @@ func (cl *BulkClient) processRequests(ctx context.Context, resList <-chan roundT
 	}
 }
 
-// Parse and recreate a Response object with a new Request object (without a timeout).
+// parseResponse and recreate a Response object with a new Request object (without a timeout).
 // It is easy to read from the response object later after we're done processing all requests or we timeout.
 // We do not want to be reading from a response for which the request has been canceled.
 // We simply close the original response at the end of this function.
