@@ -192,11 +192,11 @@ func (r *RoundTrip) updateErrorForIndex(err error, index int) *RoundTrip {
 }
 
 func (cl *BulkClient) fireRequests(reqList <-chan requestParcel, receivedResponses chan<- roundTripParcel, stopProcessing <-chan struct{}) {
-	for reqParcel := range reqList {
+	for {
 		select {
 		case <-stopProcessing:
 			return
-		default:
+		case reqParcel := <-reqList:
 			receivedResponses <- cl.executeRequest(reqParcel)
 		}
 	}
@@ -214,11 +214,11 @@ func (cl *BulkClient) executeRequest(reqParcel requestParcel) roundTripParcel {
 }
 
 func (cl *BulkClient) processRequests(ctx context.Context, resList <-chan roundTripParcel, processedResponses chan<- roundTripParcel, stopProcessing <-chan struct{}) {
-	for resParcel := range resList {
+	for {
 		select {
 		case <-stopProcessing:
 			return
-		default:
+		case resParcel := <-resList:
 			processedResponses <- cl.parseResponse(ctx, resParcel)
 		}
 	}

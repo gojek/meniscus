@@ -5,16 +5,13 @@ import (
 	"fmt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	metrics "github.com/tevjef/go-runtime-metrics"
-	_ "github.com/tevjef/go-runtime-metrics/expvar"
 	"io/ioutil"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
 	"time"
-	"os"
+	"runtime"
 )
 
 const (
@@ -23,38 +20,16 @@ const (
 	FailingTimeoutValue         = MockServerSlowResponseSleep - 40*time.Millisecond
 )
 
-func CollectMetrics() {
-	sock, e := net.Listen("tcp", "localhost:6060")
-	if e != nil {
-		fmt.Printf("Could not start the metrics server %+v\n", e)
-	}
-
-	go func() {
-		fmt.Println("TCP Metrics Collector Server now available at port 6060")
-		http.Serve(sock, nil)
-	}()
-
-	err := metrics.RunCollector(metrics.DefaultConfig)
-	if err != nil {
-		fmt.Printf("Could not start the metrics collector %+v\n", err)
-	}
-}
-
-func TestMain(m *testing.M) {
-	CollectMetrics()
-	os.Exit(m.Run())
-}
-
 func TestBulkHTTPClientExecutesRequestsConcurrentlyAndAllRequestsSucceed(t *testing.T) {
-	time.Sleep(20 * time.Second)
 	server := StartMockServer()
 	defer server.Close()
+	noOfRequests := 10
 	timeout := NonFailingTimeoutValue
 	httpclient := &http.Client{Timeout: timeout}
 	client := NewBulkHTTPClient(httpclient, timeout)
 	bulkRequest := NewBulkRequest()
 
-	for i := 0; i < 5000; i++ {
+	for i := 0; i < noOfRequests; i++ {
 		query := url.Values{}
 		query.Set("kind", "fast")
 		req, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", query), nil)
@@ -64,7 +39,7 @@ func TestBulkHTTPClientExecutesRequestsConcurrentlyAndAllRequestsSucceed(t *test
 
 	responses, _ := client.Do(bulkRequest, 10, 10)
 
-	assert.Equal(t, 5000, len(responses))
+	assert.Equal(t, noOfRequests, len(responses))
 
 	for _, resp := range responses {
 		resByte, e := ioutil.ReadAll(resp.Body)
@@ -273,6 +248,52 @@ func TestBulkHTTPClientSomeRequestsTimeoutAndOthersSucceedOrFailWithOneRequestWo
 	assert.Equal(t, ErrRequestIgnored, errs[3])
 }
 
+func TestBulkClientRequestFirerAndProcessorGoroutinesAreClosed(t *testing.T) {
+	server := StartMockServer()
+	defer server.Close()
+	timeout := NonFailingTimeoutValue
+	httpclient := &http.Client{Timeout: timeout}
+	totalBulkRequests := 100
+	reqsPerBulkRequest := 3
+	bulkRequestsDone := 0
+	var responses []*http.Response
+	var errs []error
+	for noOfBulkRequests := 0; noOfBulkRequests < totalBulkRequests; noOfBulkRequests++ {
+		client := NewBulkHTTPClient(httpclient, timeout)
+		bulkRequest := newBulkClientWithNRequests(reqsPerBulkRequest, server.URL)
+		res, err := client.Do(bulkRequest, 10, 10)
+		responses = append(responses, res...)
+		errs = append(errs, err...)
+		bulkRequestsDone = bulkRequestsDone + 1
+		bulkRequest.CloseAllResponses()
+	}
+
+	assert.Equal(t, totalBulkRequests, bulkRequestsDone)
+	assert.Equal(t, totalBulkRequests * reqsPerBulkRequest, len(responses))
+	assert.Equal(t, totalBulkRequests * reqsPerBulkRequest, len(errs))
+	time.Sleep(1 * time.Second)
+
+	isLessThan20 := func(x int) bool {
+		if x < 20 {
+			return true
+		} else {
+			fmt.Printf("CAUSE OF FAILURE: %d is greater than 20\n", x)
+			return false
+		}
+	}
+
+	assert.True(t, isLessThan20(runtime.NumGoroutine()))
+}
+
+func newBulkClientWithNRequests(n int, serverURL string) *RoundTrip {
+	bulkRequest := NewBulkRequest()
+	for i := 0; i < n; i++ {
+		query := url.Values{}
+		req, _ := http.NewRequest(http.MethodGet, encodeURL(serverURL, "", query), nil)
+		bulkRequest.AddRequest(req)
+	}
+	return bulkRequest
+}
 func StartMockServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(slowOrFastServerHandler))
 }
