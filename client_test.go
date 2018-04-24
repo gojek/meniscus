@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"testing"
 	"time"
-	"runtime"
 )
 
 const (
@@ -253,15 +253,16 @@ func TestBulkClientRequestFirerAndProcessorGoroutinesAreClosed(t *testing.T) {
 	defer server.Close()
 	timeout := NonFailingTimeoutValue
 	httpclient := &http.Client{Timeout: timeout}
-	totalBulkRequests := 100
-	reqsPerBulkRequest := 3
+	totalBulkRequests := 50
+	reqsPerBulkRequest := 5
 	bulkRequestsDone := 0
 	var responses []*http.Response
 	var errs []error
+
 	for noOfBulkRequests := 0; noOfBulkRequests < totalBulkRequests; noOfBulkRequests++ {
 		client := NewBulkHTTPClient(httpclient, timeout)
 		bulkRequest := newBulkClientWithNRequests(reqsPerBulkRequest, server.URL)
-		res, err := client.Do(bulkRequest, 10, 10)
+		res, err := client.Do(bulkRequest, 5, 5)
 		responses = append(responses, res...)
 		errs = append(errs, err...)
 		bulkRequestsDone = bulkRequestsDone + 1
@@ -269,9 +270,8 @@ func TestBulkClientRequestFirerAndProcessorGoroutinesAreClosed(t *testing.T) {
 	}
 
 	assert.Equal(t, totalBulkRequests, bulkRequestsDone)
-	assert.Equal(t, totalBulkRequests * reqsPerBulkRequest, len(responses))
-	assert.Equal(t, totalBulkRequests * reqsPerBulkRequest, len(errs))
-	time.Sleep(1 * time.Second)
+	assert.Equal(t, totalBulkRequests*reqsPerBulkRequest, len(responses))
+	assert.Equal(t, totalBulkRequests*reqsPerBulkRequest, len(errs))
 
 	isLessThan20 := func(x int) bool {
 		if x < 20 {

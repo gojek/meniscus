@@ -19,4 +19,4 @@ start-metrics-listener:
 	brew services start influxdb
 	$(GOPATH)/src/github.com/influxdata/telegraf/telegraf -config telegraf.conf
 test-runtime:
-	go test -run TestBulkClientRuntimeMetrics
+	REQUESTS=500 REQUEST_SIZE=5 TIME_INTERVAL_IN_MS=2000 go test -run TestBulkClientRuntimeMetrics
