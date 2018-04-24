@@ -262,7 +262,7 @@ func TestBulkClientRequestFirerAndProcessorGoroutinesAreClosed(t *testing.T) {
 	for noOfBulkRequests := 0; noOfBulkRequests < totalBulkRequests; noOfBulkRequests++ {
 		client := NewBulkHTTPClient(httpclient, timeout)
 		bulkRequest := newBulkClientWithNRequests(reqsPerBulkRequest, server.URL)
-		res, err := client.Do(bulkRequest, 5, 5)
+		res, err := client.Do(bulkRequest, 10, 10)
 		responses = append(responses, res...)
 		errs = append(errs, err...)
 		bulkRequestsDone = bulkRequestsDone + 1
@@ -274,12 +274,12 @@ func TestBulkClientRequestFirerAndProcessorGoroutinesAreClosed(t *testing.T) {
 	assert.Equal(t, totalBulkRequests*reqsPerBulkRequest, len(errs))
 
 	isLessThan20 := func(x int) bool {
-		if x < 20 {
+		if x < 50 {
 			return true
-		} else {
-			fmt.Printf("CAUSE OF FAILURE: %d is greater than 20\n", x)
-			return false
 		}
+
+		fmt.Printf("CAUSE OF FAILURE: %d is greater than 20\n", x)
+		return false
 	}
 
 	assert.True(t, isLessThan20(runtime.NumGoroutine()))
