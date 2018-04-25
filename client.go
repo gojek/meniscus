@@ -132,6 +132,8 @@ func (r *RoundTrip) publishAllRequests(requestList chan<- requestParcel) {
 
 		requestList <- reqParcel
 	}
+
+	close(requestList)
 }
 
 func (cl *BulkClient) completionListener(bulkRequest *RoundTrip, collectResponses <-chan []roundTripParcel) {
@@ -192,12 +194,11 @@ func (r *RoundTrip) updateErrorForIndex(err error, index int) *RoundTrip {
 }
 
 func (cl *BulkClient) fireRequests(reqList <-chan requestParcel, receivedResponses chan<- roundTripParcel, stopProcessing <-chan struct{}) {
-	for {
+	for reqParcel := range reqList {
 		select {
+		case receivedResponses <- cl.executeRequest(reqParcel):
 		case <-stopProcessing:
 			return
-		case reqParcel := <-reqList:
-			receivedResponses <- cl.executeRequest(reqParcel)
 		}
 	}
 }
@@ -216,10 +217,10 @@ func (cl *BulkClient) executeRequest(reqParcel requestParcel) roundTripParcel {
 func (cl *BulkClient) processRequests(ctx context.Context, resList <-chan roundTripParcel, processedResponses chan<- roundTripParcel, stopProcessing <-chan struct{}) {
 	for {
 		select {
-		case <-stopProcessing:
-			return
 		case resParcel := <-resList:
 			processedResponses <- cl.parseResponse(ctx, resParcel)
+		case <-stopProcessing:
+			return
 		}
 	}
 }
