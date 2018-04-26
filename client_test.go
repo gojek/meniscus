@@ -273,7 +273,7 @@ func TestBulkClientRequestFirerAndProcessorGoroutinesAreClosed(t *testing.T) {
 	assert.Equal(t, totalBulkRequests*reqsPerBulkRequest, len(responses))
 	assert.Equal(t, totalBulkRequests*reqsPerBulkRequest, len(errs))
 
-	isLessThan20 := func(x int) bool {
+	isLessThan50 := func(x int) bool {
 		if x < 50 {
 			return true
 		}
@@ -282,8 +282,7 @@ func TestBulkClientRequestFirerAndProcessorGoroutinesAreClosed(t *testing.T) {
 		return false
 	}
 
-	time.Sleep(10 * time.Second)
-	assert.True(t, isLessThan20(runtime.NumGoroutine()))
+	assert.True(t, isLessThan50(runtime.NumGoroutine()))
 }
 
 func newBulkClientWithNRequests(n int, serverURL string) *RoundTrip {

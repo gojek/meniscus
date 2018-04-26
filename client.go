@@ -203,15 +203,16 @@ func (cl *BulkClient) workerManager(ctx context.Context,
 
 	publishWg.Add(1)
 	go bulkRequest.publishAllRequests(requestList, stopProcessing, &publishWg)
-	go cl.fireRequestsManager(fireRequestsWorkers, requestList, recievedResponses, stopProcessing, &fireWg)
-	go cl.processRequestsManager(ctx, processResponseWorkers, recievedResponses, processedResponses, stopProcessing, &processWg)
+	cl.fireRequestsManager(fireRequestsWorkers, requestList, recievedResponses, stopProcessing, &fireWg)
+	cl.processRequestsManager(ctx, processResponseWorkers, recievedResponses, processedResponses, stopProcessing, &processWg)
 
 	publishWg.Wait()
-	fireWg.Wait()
-	processWg.Wait()
-
 	close(requestList)
+
+	fireWg.Wait()
 	close(recievedResponses)
+
+	processWg.Wait()
 	close(processedResponses)
 }
 
