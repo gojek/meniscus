@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -98,16 +99,7 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, proces
 	}
 
 	go cl.responseMux(ctx, bulkRequest, processedResponses, collectResponses)
-
-	for nWorker := 0; nWorker < fireRequestsWorkers; nWorker++ {
-		go cl.fireRequests(requestList, recievedResponses, stopProcessing)
-	}
-
-	for mWorker := 0; mWorker < processResponseWorkers; mWorker++ {
-		go cl.processRequests(ctx, recievedResponses, processedResponses, stopProcessing)
-	}
-
-	go bulkRequest.publishAllRequests(requestList)
+	go cl.workerManager(ctx, bulkRequest, fireRequestsWorkers, processResponseWorkers, requestList, recievedResponses, processedResponses, stopProcessing)
 
 	cl.completionListener(bulkRequest, collectResponses)
 
@@ -123,21 +115,27 @@ func (r *RoundTrip) CloseAllResponses() {
 	}
 }
 
-func (r *RoundTrip) publishAllRequests(requestList chan<- requestParcel) {
+func (r *RoundTrip) publishAllRequests(requestList chan<- requestParcel, stopProcessing <-chan struct{}, publishWg *sync.WaitGroup) {
+LOOP:
 	for index := range r.requests {
 		reqParcel := requestParcel{
 			request: r.requests[index],
 			index:   index,
 		}
 
-		requestList <- reqParcel
+		select {
+		case requestList <- reqParcel:
+		case <-stopProcessing:
+			break LOOP
+		}
 	}
 
-	close(requestList)
+	publishWg.Done()
 }
 
-func (cl *BulkClient) completionListener(bulkRequest *RoundTrip, collectResponses <-chan []roundTripParcel) {
-	for _, resParcel := range <-collectResponses {
+func (cl *BulkClient) completionListener(bulkRequest *RoundTrip, collectResponses chan []roundTripParcel) {
+	responses := <-collectResponses
+	for _, resParcel := range responses {
 		if resParcel.err != nil {
 			bulkRequest.updateErrorForIndex(resParcel.err, resParcel.index)
 		} else {
@@ -145,32 +143,33 @@ func (cl *BulkClient) completionListener(bulkRequest *RoundTrip, collectResponse
 		}
 	}
 
+	close(collectResponses)
 	bulkRequest.addRequestIgnoredErrors()
 }
 
-func (cl *BulkClient) responseMux(ctx context.Context, bulkRequest *RoundTrip, processedResponses <-chan roundTripParcel, collectResponses chan<- []roundTripParcel) {
-	var arrayOfResponses []roundTripParcel
-	var writtenOnce bool
+func (cl *BulkClient) responseMux(ctx context.Context,
+	bulkRequest *RoundTrip,
+	processedResponses <-chan roundTripParcel, collectResponses chan<- []roundTripParcel) {
 
+	var arrayOfResponses []roundTripParcel
+LOOP:
 	for done := 0; done < len(bulkRequest.requests); {
 		select {
 		case <-ctx.Done():
-			if !writtenOnce {
-				collectResponses <- arrayOfResponses
-				writtenOnce = true
-			}
+			break LOOP
 
-		case resParcel := <-processedResponses:
-			arrayOfResponses = append(arrayOfResponses, resParcel)
-			done++
+		case resParcel, isOpen := <-processedResponses:
+			if isOpen {
+				arrayOfResponses = append(arrayOfResponses, resParcel)
+				done++
+			} else {
+				break LOOP
+			}
 		}
 
 	}
 
-	if !writtenOnce {
-		collectResponses <- arrayOfResponses
-		writtenOnce = true
-	}
+	collectResponses <- arrayOfResponses
 }
 
 func (r *RoundTrip) addRequestIgnoredErrors() {
@@ -193,14 +192,71 @@ func (r *RoundTrip) updateErrorForIndex(err error, index int) *RoundTrip {
 	return r
 }
 
-func (cl *BulkClient) fireRequests(reqList <-chan requestParcel, receivedResponses chan<- roundTripParcel, stopProcessing <-chan struct{}) {
+func (cl *BulkClient) workerManager(ctx context.Context,
+	bulkRequest *RoundTrip,
+	fireRequestsWorkers int, processResponseWorkers int,
+	requestList chan requestParcel,
+	recievedResponses chan roundTripParcel, processedResponses chan roundTripParcel,
+	stopProcessing chan struct{}) {
+
+	var publishWg, fireWg, processWg sync.WaitGroup
+
+	publishWg.Add(1)
+	go bulkRequest.publishAllRequests(requestList, stopProcessing, &publishWg)
+	go cl.fireRequestsManager(fireRequestsWorkers, requestList, recievedResponses, stopProcessing, &fireWg)
+	go cl.processRequestsManager(ctx, processResponseWorkers, recievedResponses, processedResponses, stopProcessing, &processWg)
+
+	publishWg.Wait()
+	fireWg.Wait()
+	processWg.Wait()
+
+	close(requestList)
+	close(recievedResponses)
+	close(processedResponses)
+}
+
+func (cl *BulkClient) fireRequestsManager(fireRequestsWorkers int,
+	requestList <-chan requestParcel,
+	recievedResponses chan<- roundTripParcel,
+	stopProcessing <-chan struct{},
+	fireWg *sync.WaitGroup) {
+
+	for nWorker := 0; nWorker < fireRequestsWorkers; nWorker++ {
+		fireWg.Add(1)
+		go cl.fireRequests(requestList, recievedResponses, stopProcessing, fireWg)
+	}
+
+}
+
+func (cl *BulkClient) processRequestsManager(ctx context.Context,
+	processResponseWorkers int,
+	recievedResponses <-chan roundTripParcel, processedResponses chan<- roundTripParcel,
+	stopProcessing <-chan struct{}, processWg *sync.WaitGroup) {
+
+	for mWorker := 0; mWorker < processResponseWorkers; mWorker++ {
+		processWg.Add(1)
+		go cl.processRequests(ctx, recievedResponses, processedResponses, stopProcessing, processWg)
+	}
+
+}
+
+func (cl *BulkClient) fireRequests(reqList <-chan requestParcel,
+	receivedResponses chan<- roundTripParcel,
+	stopProcessing <-chan struct{},
+	fireWg *sync.WaitGroup) {
+
+LOOP:
 	for reqParcel := range reqList {
+		result := cl.executeRequest(reqParcel)
+
 		select {
-		case receivedResponses <- cl.executeRequest(reqParcel):
+		case receivedResponses <- result:
 		case <-stopProcessing:
-			return
+			break LOOP
 		}
 	}
+
+	fireWg.Done()
 }
 
 func (cl *BulkClient) executeRequest(reqParcel requestParcel) roundTripParcel {
@@ -214,15 +270,24 @@ func (cl *BulkClient) executeRequest(reqParcel requestParcel) roundTripParcel {
 	}
 }
 
-func (cl *BulkClient) processRequests(ctx context.Context, resList <-chan roundTripParcel, processedResponses chan<- roundTripParcel, stopProcessing <-chan struct{}) {
-	for {
+func (cl *BulkClient) processRequests(ctx context.Context,
+	resList <-chan roundTripParcel,
+	processedResponses chan<- roundTripParcel,
+	stopProcessing <-chan struct{},
+	processWg *sync.WaitGroup) {
+
+LOOP:
+	for resParcel := range resList {
+		result := cl.parseResponse(ctx, resParcel)
+
 		select {
-		case resParcel := <-resList:
-			processedResponses <- cl.parseResponse(ctx, resParcel)
+		case processedResponses <- result:
 		case <-stopProcessing:
-			return
+			break LOOP
 		}
 	}
+
+	processWg.Done()
 }
 
 // parseResponse and recreate a Response object with a new Request object (without a timeout).

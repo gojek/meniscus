@@ -282,6 +282,7 @@ func TestBulkClientRequestFirerAndProcessorGoroutinesAreClosed(t *testing.T) {
 		return false
 	}
 
+	time.Sleep(10 * time.Second)
 	assert.True(t, isLessThan20(runtime.NumGoroutine()))
 }
 
