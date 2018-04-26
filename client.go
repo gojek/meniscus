@@ -1,4 +1,4 @@
-package bulkhttpclient
+package meniscus
 
 import (
 	"bytes"
