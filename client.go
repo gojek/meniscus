@@ -249,10 +249,10 @@ func (cl *BulkClient) fireRequests(reqList <-chan requestParcel,
 LOOP:
 	for reqParcel := range reqList {
 		result := cl.executeRequest(reqParcel)
-
 		select {
 		case receivedResponses <- result:
 		case <-stopProcessing:
+			if result.response != nil { result.response.Body.Close() }
 			break LOOP
 		}
 	}
