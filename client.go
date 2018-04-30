@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"sync"
@@ -252,7 +253,10 @@ LOOP:
 		select {
 		case receivedResponses <- result:
 		case <-stopProcessing:
-			if result.response != nil { result.response.Body.Close() }
+			if result.response != nil {
+				io.Copy(ioutil.Discard, result.response.Body)
+				result.response.Body.Close()
+			}
 			break LOOP
 		}
 	}
@@ -296,11 +300,9 @@ LOOP:
 // We do not want to be reading from a response for which the request has been canceled.
 // We simply close the original response at the end of this function.
 func (cl *BulkClient) parseResponse(ctx context.Context, res roundTripParcel) roundTripParcel {
-	defer func() {
-		if res.response != nil {
-			res.response.Body.Close()
-		}
-	}()
+	if res.response != nil {
+		defer res.response.Body.Close()
+	}
 
 	if res.err != nil && (ctx.Err() == context.Canceled || ctx.Err() == context.DeadlineExceeded) {
 		return roundTripParcel{err: ErrRequestIgnored, index: res.index}
