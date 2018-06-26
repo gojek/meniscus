@@ -43,6 +43,22 @@ func NewBulkHTTPClient(client HTTPClient, timeout time.Duration) *BulkClient {
 	}
 }
 
+type roundTripChannels struct {
+	requestList        chan requestParcel
+	receivedResponses  chan roundTripParcel
+	processedResponses chan roundTripParcel
+	collectResponses   chan []roundTripParcel
+}
+
+func newRoundTripChannels() roundTripChannels {
+	return roundTripChannels{
+		requestList:        make(chan requestParcel),
+		receivedResponses:  make(chan roundTripParcel),
+		processedResponses: make(chan roundTripParcel),
+		collectResponses:   make(chan []roundTripParcel),
+	}
+}
+
 //Do ...
 func (cl *BulkClient) Do(bulkRequest *RoundTrip) ([]*http.Response, []error) {
 	noOfRequests := len(bulkRequest.requests)
@@ -53,10 +69,8 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip) ([]*http.Response, []error) {
 	bulkRequest.responses = make([]*http.Response, noOfRequests)
 	bulkRequest.errors = make([]error, noOfRequests)
 
-	requestList := make(chan requestParcel)
-	recievedResponses := make(chan roundTripParcel)
-	processedResponses := make(chan roundTripParcel)
-	collectResponses := make(chan []roundTripParcel)
+	roundTripChannels := newRoundTripChannels()
+
 	stopProcessing := make(chan struct{})
 	defer close(stopProcessing)
 
@@ -67,10 +81,16 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip) ([]*http.Response, []error) {
 		bulkRequest.requests[index] = req.WithContext(ctx)
 	}
 
-	go cl.responseMux(ctx, bulkRequest, processedResponses, collectResponses)
-	go cl.workerManager(ctx, bulkRequest, requestList, recievedResponses, processedResponses, stopProcessing)
+	go cl.responseMux(ctx,
+		bulkRequest,
+		roundTripChannels.processedResponses,
+		roundTripChannels.collectResponses)
+	go cl.workerManager(ctx,
+		bulkRequest,
+		&roundTripChannels,
+		stopProcessing)
 
-	cl.completionListener(bulkRequest, collectResponses)
+	cl.completionListener(bulkRequest, roundTripChannels.collectResponses)
 
 	return bulkRequest.responses, bulkRequest.errors
 }
@@ -114,27 +134,34 @@ LOOP:
 	collectResponses <- arrayOfResponses
 }
 
-func (cl *BulkClient) workerManager(ctx context.Context,
-	bulkRequest *RoundTrip,
-	requestList chan requestParcel,
-	recievedResponses chan roundTripParcel, processedResponses chan roundTripParcel,
-	stopProcessing chan struct{}) {
-
+func (cl *BulkClient) workerManager(ctx context.Context, bulkRequest *RoundTrip, roundTripChannels *roundTripChannels, stopProcessing chan struct{}) {
 	var publishWg, fireWg, processWg sync.WaitGroup
 
 	publishWg.Add(1)
-	go bulkRequest.publishAllRequests(requestList, stopProcessing, &publishWg)
-	cl.fireRequestsManager(bulkRequest.fireRequestsWorkers, requestList, recievedResponses, stopProcessing, &fireWg)
-	cl.processRequestsManager(ctx, bulkRequest.processResponseWorkers, recievedResponses, processedResponses, stopProcessing, &processWg)
+	go bulkRequest.publishAllRequests(roundTripChannels.requestList,
+		stopProcessing,
+		&publishWg)
+
+	cl.fireRequestsManager(bulkRequest.fireRequestsWorkers,
+		roundTripChannels.requestList,
+		roundTripChannels.receivedResponses,
+		stopProcessing,
+		&fireWg)
+	cl.processRequestsManager(ctx,
+		bulkRequest.processResponseWorkers,
+		roundTripChannels.receivedResponses,
+		roundTripChannels.processedResponses,
+		stopProcessing,
+		&processWg)
 
 	publishWg.Wait()
-	close(requestList)
+	close(roundTripChannels.requestList)
 
 	fireWg.Wait()
-	close(recievedResponses)
+	close(roundTripChannels.receivedResponses)
 
 	processWg.Wait()
-	close(processedResponses)
+	close(roundTripChannels.processedResponses)
 }
 
 func (cl *BulkClient) fireRequestsManager(fireRequestsWorkers int,

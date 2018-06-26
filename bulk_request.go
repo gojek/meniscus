@@ -20,9 +20,9 @@ type RoundTrip struct {
 }
 
 //NewBulkRequest ...
-func NewBulkRequest(fireRequestsWorkers int, processResponseWorkers int) *RoundTrip {
+func NewBulkRequest(requests []*http.Request, fireRequestsWorkers int, processResponseWorkers int) *RoundTrip {
 	return &RoundTrip{
-		requests:               []*http.Request{},
+		requests:               requests,
 		fireRequestsWorkers:    fireRequestsWorkers,
 		responses:              []*http.Response{},
 		processResponseWorkers: processResponseWorkers,

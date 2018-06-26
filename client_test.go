@@ -27,15 +27,17 @@ func TestBulkHTTPClientExecutesRequestsConcurrentlyAndAllRequestsSucceed(t *test
 	timeout := NonFailingTimeoutValue
 	httpclient := &http.Client{Timeout: timeout}
 	client := NewBulkHTTPClient(httpclient, timeout)
-	bulkRequest := NewBulkRequest(10, 10)
+	var requests []*http.Request
 
 	for i := 0; i < noOfRequests; i++ {
 		query := url.Values{}
 		query.Set("kind", "fast")
 		req, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", query), nil)
 		require.NoError(t, err, "no errors")
-		bulkRequest.AddRequest(req)
+		requests = append(requests, req)
 	}
+
+	bulkRequest := NewBulkRequest(requests, 10, 10)
 
 	responses, _ := client.Do(bulkRequest)
 
@@ -57,7 +59,6 @@ func TestBulkHTTPClientReturnsResponsesInOrder(t *testing.T) {
 	bulkClientTimeout := NonFailingTimeoutValue
 	httpclient := &http.Client{Timeout: NonFailingTimeoutValue}
 	client := NewBulkHTTPClient(httpclient, bulkClientTimeout)
-	bulkRequest := NewBulkRequest(10, 10)
 
 	queryFast := url.Values{}
 	queryFast.Set("kind", "fast")
@@ -67,15 +68,14 @@ func TestBulkHTTPClientReturnsResponsesInOrder(t *testing.T) {
 
 	reqOne, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", querySlow), nil)
 	require.NoError(t, err, "no errors")
-	bulkRequest.AddRequest(reqOne)
 
 	reqTwo, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", queryFast), nil)
 	require.NoError(t, err, "no errors")
-	bulkRequest.AddRequest(reqTwo)
 
 	reqThree, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", querySlow), nil)
 	require.NoError(t, err, "no errors")
-	bulkRequest.AddRequest(reqThree)
+
+	bulkRequest := NewBulkRequest([]*http.Request{reqOne, reqTwo, reqThree}, 10, 10)
 
 	responses, _ := client.Do(bulkRequest)
 	responseOne, _ := ioutil.ReadAll(responses[0].Body)
@@ -95,7 +95,6 @@ func TestBulkHTTPClientAllRequestsFailDueToBulkClientContextTimeout(t *testing.T
 	bulkClientTimeout := FailingTimeoutValue
 	httpclient := &http.Client{Timeout: NonFailingTimeoutValue}
 	client := NewBulkHTTPClient(httpclient, bulkClientTimeout)
-	bulkRequest := NewBulkRequest(10, 10)
 
 	queryFast := url.Values{}
 	queryFast.Set("kind", "fast")
@@ -105,16 +104,14 @@ func TestBulkHTTPClientAllRequestsFailDueToBulkClientContextTimeout(t *testing.T
 
 	reqOne, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", querySlow), nil)
 	require.NoError(t, err, "no errors")
-	bulkRequest.AddRequest(reqOne)
 
 	reqTwo, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", querySlow), nil)
 	require.NoError(t, err, "no errors")
-	bulkRequest.AddRequest(reqTwo)
 
 	reqThree, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", queryFast), nil)
 	require.NoError(t, err, "no errors")
-	bulkRequest.AddRequest(reqThree)
 
+	bulkRequest := NewBulkRequest([]*http.Request{reqOne, reqTwo, reqThree}, 10, 10)
 	responses, errors := client.Do(bulkRequest)
 
 	assert.Nil(t, responses[0])
@@ -135,7 +132,6 @@ func TestBulkHTTPClientAllRequestsFailDueToHTTPClientTimeout(t *testing.T) {
 	bulkClientTimeout := NonFailingTimeoutValue
 	httpclient := &http.Client{Timeout: FailingTimeoutValue}
 	client := NewBulkHTTPClient(httpclient, bulkClientTimeout)
-	bulkRequest := NewBulkRequest(10, 10)
 
 	queryFast := url.Values{}
 	queryFast.Set("kind", "fast")
@@ -145,12 +141,11 @@ func TestBulkHTTPClientAllRequestsFailDueToHTTPClientTimeout(t *testing.T) {
 
 	reqOne, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", querySlow), nil)
 	require.NoError(t, err, "no errors")
-	bulkRequest.AddRequest(reqOne)
 
 	reqTwo, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", querySlow), nil)
 	require.NoError(t, err, "no errors")
-	bulkRequest.AddRequest(reqTwo)
 
+	bulkRequest := NewBulkRequest([]*http.Request{reqOne, reqTwo}, 10, 10)
 	responses, errs := client.Do(bulkRequest)
 
 	expectedClientTimeoutError := fmt.Errorf("http client error: Get %s?kind=slow: net/http: request canceled (Client.Timeout exceeded while awaiting headers)", server.URL)
@@ -169,7 +164,6 @@ func TestBulkHTTPClientSomeRequestsTimeoutAndOthersSucceedOrFailWithManyRequestW
 	bulkClientTimeout := FailingTimeoutValue
 	httpclient := &http.Client{Timeout: NonFailingTimeoutValue}
 	client := NewBulkHTTPClient(httpclient, bulkClientTimeout)
-	bulkRequest := NewBulkRequest(2, 2)
 
 	queryFast := url.Values{}
 	queryFast.Set("kind", "fast")
@@ -177,24 +171,21 @@ func TestBulkHTTPClientSomeRequestsTimeoutAndOthersSucceedOrFailWithManyRequestW
 	querySlow := url.Values{}
 	querySlow.Set("kind", "slow")
 
-	reqOne, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", querySlow), nil)
+	reqOne, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", querySlow), nil) // bulk client timeout exceeded
 	require.NoError(t, err, "no errors")
-	bulkRequest.AddRequest(reqOne) // bulk client timeout exceeded
 
-	reqTwo, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", queryFast), nil)
+	reqTwo, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", queryFast), nil) // success
 	require.NoError(t, err, "no errors")
-	bulkRequest.AddRequest(reqTwo) // success
 
-	reqThree, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	reqThree, err := http.NewRequest(http.MethodGet, server.URL, nil) // http client error failure
 	require.NoError(t, err, "no errors")
 	reqThree.URL = nil
-	bulkRequest.AddRequest(reqThree) // http client error failure
 
-	reqFour, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	reqFour, err := http.NewRequest(http.MethodGet, server.URL, nil) // http client error failure
 	require.NoError(t, err, "no errors")
 	reqFour.URL = nil
-	bulkRequest.AddRequest(reqFour) // http client error failure
 
+	bulkRequest := NewBulkRequest([]*http.Request{reqOne, reqTwo, reqThree, reqFour}, 2, 2)
 	responses, errs := client.Do(bulkRequest)
 	defer bulkRequest.CloseAllResponses()
 
@@ -213,7 +204,6 @@ func TestBulkHTTPClientSomeRequestsTimeoutAndOthersSucceedOrFailWithOneRequestWo
 	bulkClientTimeout := FailingTimeoutValue
 	httpclient := &http.Client{Timeout: NonFailingTimeoutValue}
 	client := NewBulkHTTPClient(httpclient, bulkClientTimeout)
-	bulkRequest := NewBulkRequest(1, 1)
 
 	queryFast := url.Values{}
 	queryFast.Set("kind", "fast")
@@ -221,24 +211,21 @@ func TestBulkHTTPClientSomeRequestsTimeoutAndOthersSucceedOrFailWithOneRequestWo
 	querySlow := url.Values{}
 	querySlow.Set("kind", "slow")
 
-	reqOne, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", querySlow), nil)
+	reqOne, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", querySlow), nil)  // bulk client timeout exceeded
 	require.NoError(t, err, "no errors")
-	bulkRequest.AddRequest(reqOne) // bulk client timeout exceeded
 
-	reqTwo, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", queryFast), nil)
+	reqTwo, err := http.NewRequest(http.MethodGet, encodeURL(server.URL, "", queryFast), nil)  // success
 	require.NoError(t, err, "no errors")
-	bulkRequest.AddRequest(reqTwo) // success
 
-	reqThree, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	reqThree, err := http.NewRequest(http.MethodGet, server.URL, nil)// http client error failure
 	require.NoError(t, err, "no errors")
 	reqThree.URL = nil
-	bulkRequest.AddRequest(reqThree) // http client error failure
 
-	reqFour, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	reqFour, err := http.NewRequest(http.MethodGet, server.URL, nil)  // http client error failure
 	require.NoError(t, err, "no errors")
 	reqFour.URL = nil
-	bulkRequest.AddRequest(reqFour) // http client error failure
 
+	bulkRequest := NewBulkRequest([]*http.Request{reqOne, reqTwo, reqThree, reqFour}, 1, 1)
 	_, errs := client.Do(bulkRequest)
 	defer bulkRequest.CloseAllResponses()
 
@@ -286,12 +273,14 @@ func TestBulkClientRequestFirerAndProcessorGoroutinesAreClosed(t *testing.T) {
 }
 
 func newBulkClientWithNRequests(n int, serverURL string) *RoundTrip {
-	bulkRequest := NewBulkRequest(10, 10)
+	var requests []*http.Request
 	for i := 0; i < n; i++ {
 		query := url.Values{}
 		req, _ := http.NewRequest(http.MethodGet, encodeURL(serverURL, "", query), nil)
-		bulkRequest.AddRequest(req)
+		requests = append(requests, req)
 	}
+
+	bulkRequest := NewBulkRequest(requests, 10, 10)
 	return bulkRequest
 }
 func StartMockServer() *httptest.Server {
