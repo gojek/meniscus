@@ -7,10 +7,10 @@ setup:
 	go get github.com/stretchr/testify/assert
 
 test:
-	go test client_test.go client.go
+	go test client_test.go errors.go bulk_request.go client.go
 
 stress-test:
-	go test client_test.go client.go -race -parallel 16 -cpu 1,2,4
+	go test client_test.go errors.go bulk_request.go client.go -race -parallel 16 -cpu 1,2,4
 
 runtime-test:
 	REQUESTS=500 REQUEST_SIZE=5 TIME_INTERVAL_IN_MS=2000 ITERATIONS=30 go test perf-test/runtime_metrics_test.go perf-test/runtime_metrics.go -run TestBulkClientRuntimeMetrics -test.v

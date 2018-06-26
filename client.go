@@ -17,29 +17,11 @@ type HTTPClient interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
-//Request ..
-type Request interface {
-	Add(*http.Request) Request
-}
-
 //BulkClient ...
 type BulkClient struct {
 	httpclient HTTPClient
 	timeout    time.Duration
 }
-
-//RoundTrip ...
-type RoundTrip struct {
-	requests  []*http.Request
-	responses []*http.Response
-	errors    []error
-}
-
-//ErrNoRequests ...
-var ErrNoRequests = errors.New("no requests provided")
-
-//ErrRequestIgnored ...
-var ErrRequestIgnored = errors.New("request ignored")
 
 type requestParcel struct {
 	request *http.Request
@@ -59,20 +41,6 @@ func NewBulkHTTPClient(client HTTPClient, timeout time.Duration) *BulkClient {
 		httpclient: client,
 		timeout:    timeout,
 	}
-}
-
-//NewBulkRequest ...
-func NewBulkRequest() *RoundTrip {
-	return &RoundTrip{
-		requests:  []*http.Request{},
-		responses: []*http.Response{},
-	}
-}
-
-//AddRequest ...
-func (r *RoundTrip) AddRequest(request *http.Request) *RoundTrip {
-	r.requests = append(r.requests, request)
-	return r
 }
 
 //Do ...
@@ -105,33 +73,6 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, proces
 	cl.completionListener(bulkRequest, collectResponses)
 
 	return bulkRequest.responses, bulkRequest.errors
-}
-
-//CloseAllResponses ...
-func (r *RoundTrip) CloseAllResponses() {
-	for _, response := range r.responses {
-		if response != nil {
-			response.Body.Close()
-		}
-	}
-}
-
-func (r *RoundTrip) publishAllRequests(requestList chan<- requestParcel, stopProcessing <-chan struct{}, publishWg *sync.WaitGroup) {
-LOOP:
-	for index := range r.requests {
-		reqParcel := requestParcel{
-			request: r.requests[index],
-			index:   index,
-		}
-
-		select {
-		case requestList <- reqParcel:
-		case <-stopProcessing:
-			break LOOP
-		}
-	}
-
-	publishWg.Done()
 }
 
 func (cl *BulkClient) completionListener(bulkRequest *RoundTrip, collectResponses chan []roundTripParcel) {
@@ -171,26 +112,6 @@ LOOP:
 	}
 
 	collectResponses <- arrayOfResponses
-}
-
-func (r *RoundTrip) addRequestIgnoredErrors() {
-	for i, response := range r.responses {
-		if response == nil && r.errors[i] == nil {
-			r.errors[i] = ErrRequestIgnored
-		}
-	}
-}
-
-func (r *RoundTrip) updateResponseForIndex(response *http.Response, index int) *RoundTrip {
-	r.responses[index] = response
-	r.errors[index] = nil
-	return r
-}
-
-func (r *RoundTrip) updateErrorForIndex(err error, index int) *RoundTrip {
-	r.errors[index] = err
-	r.responses[index] = nil
-	return r
 }
 
 func (cl *BulkClient) workerManager(ctx context.Context,
