@@ -5,7 +5,6 @@ import (
 	"sync"
 )
 
-
 //Request ..
 type Request interface {
 	Add(*http.Request) Request
@@ -13,17 +12,20 @@ type Request interface {
 
 //RoundTrip ...
 type RoundTrip struct {
-	requests  []*http.Request
-	responses []*http.Response
-	errors    []error
+	requests               []*http.Request
+	fireRequestsWorkers    int
+	responses              []*http.Response
+	processResponseWorkers int
+	errors                 []error
 }
 
-
 //NewBulkRequest ...
-func NewBulkRequest() *RoundTrip {
+func NewBulkRequest(fireRequestsWorkers int, processResponseWorkers int) *RoundTrip {
 	return &RoundTrip{
-		requests:  []*http.Request{},
-		responses: []*http.Response{},
+		requests:               []*http.Request{},
+		fireRequestsWorkers:    fireRequestsWorkers,
+		responses:              []*http.Response{},
+		processResponseWorkers: processResponseWorkers,
 	}
 }
 

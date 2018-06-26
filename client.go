@@ -44,7 +44,7 @@ func NewBulkHTTPClient(client HTTPClient, timeout time.Duration) *BulkClient {
 }
 
 //Do ...
-func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, processResponseWorkers int) ([]*http.Response, []error) {
+func (cl *BulkClient) Do(bulkRequest *RoundTrip) ([]*http.Response, []error) {
 	noOfRequests := len(bulkRequest.requests)
 	if noOfRequests == 0 {
 		return nil, []error{ErrNoRequests}
@@ -68,7 +68,7 @@ func (cl *BulkClient) Do(bulkRequest *RoundTrip, fireRequestsWorkers int, proces
 	}
 
 	go cl.responseMux(ctx, bulkRequest, processedResponses, collectResponses)
-	go cl.workerManager(ctx, bulkRequest, fireRequestsWorkers, processResponseWorkers, requestList, recievedResponses, processedResponses, stopProcessing)
+	go cl.workerManager(ctx, bulkRequest, requestList, recievedResponses, processedResponses, stopProcessing)
 
 	cl.completionListener(bulkRequest, collectResponses)
 
@@ -116,7 +116,6 @@ LOOP:
 
 func (cl *BulkClient) workerManager(ctx context.Context,
 	bulkRequest *RoundTrip,
-	fireRequestsWorkers int, processResponseWorkers int,
 	requestList chan requestParcel,
 	recievedResponses chan roundTripParcel, processedResponses chan roundTripParcel,
 	stopProcessing chan struct{}) {
@@ -125,8 +124,8 @@ func (cl *BulkClient) workerManager(ctx context.Context,
 
 	publishWg.Add(1)
 	go bulkRequest.publishAllRequests(requestList, stopProcessing, &publishWg)
-	cl.fireRequestsManager(fireRequestsWorkers, requestList, recievedResponses, stopProcessing, &fireWg)
-	cl.processRequestsManager(ctx, processResponseWorkers, recievedResponses, processedResponses, stopProcessing, &processWg)
+	cl.fireRequestsManager(bulkRequest.fireRequestsWorkers, requestList, recievedResponses, stopProcessing, &fireWg)
+	cl.processRequestsManager(ctx, bulkRequest.processResponseWorkers, recievedResponses, processedResponses, stopProcessing, &processWg)
 
 	publishWg.Wait()
 	close(requestList)
