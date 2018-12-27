@@ -194,8 +194,8 @@ func TestBulkHTTPClientSomeRequestsTimeoutAndOthersSucceedOrFailWithManyRequestW
 
 	assert.Equal(t, "fast", string(successResponse))
 	assert.Equal(t, ErrRequestIgnored, errs[0])
-	assert.Equal(t, errors.New("http client error: http: nil Request.URL"), errs[2])
-	assert.Equal(t, errors.New("http client error: http: nil Request.URL"), errs[3])
+	assert.Equal(t, errors.New("http client error: Get : http: nil Request.URL"), errs[2])
+	assert.Equal(t, errors.New("http client error: Get : http: nil Request.URL"), errs[3])
 }
 
 func TestBulkHTTPClientSomeRequestsTimeoutAndOthersSucceedOrFailWithOneRequestWorker(t *testing.T) {
